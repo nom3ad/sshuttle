@@ -204,11 +204,11 @@ def connect(ssh_cmd, rhostport, python, stderr, options):
 
     if sys.platform != 'win32':
         (s1, s2) = socket.socketpair()
+        pstdin, pstdout = os.dup(s1.fileno()), os.dup(s1.fileno())
 
         def preexec_fn():
             # runs in the child process
             s2.close()
-        pstdin, pstdout = os.dup(s1.fileno()), os.dup(s1.fileno())
         s1.close()
 
         def get_serversock():
@@ -216,10 +216,17 @@ def connect(ssh_cmd, rhostport, python, stderr, options):
             os.close(pstdout)
             return s2
     else:
+        # In Windows python implementation it seems not possible to use sockets as subprocess stdio
+        # Also select.select() won't work on pipes.
+        # So we have to use both socketpair and pipes together along with reader/writer threads to
+        # stream data between them
+        # NOTE: Their can be a way to use sockets as stdio with some hacks.
+        #   https://stackoverflow.com/questions/4993119/redirect-io-of-process-to-windows-socket
         (s1, s2) = socket.socketpair()
-        preexec_fn = None
         pstdin = ssubprocess.PIPE
         pstdout = ssubprocess.PIPE
+
+        preexec_fn = None
 
         def get_serversock():
             import threading
@@ -229,7 +236,7 @@ def connect(ssh_cmd, rhostport, python, stderr, options):
                     fd = p.stdout.fileno()
                     for data in iter(lambda: os.read(fd, 16384), b''):
                         s1.sendall(data)
-                        debug3(f"<<<<< p.stdout.read() {len(data)} {data[:min(32,len(data))]}...")
+                        # debug3(f"<<<<< p.stdout.read() {len(data)} {data[:min(32,len(data))]}...")
                 finally:
                     debug2("Thread 'stream_stdout_to_sock' exiting")
                     s1.close()
@@ -238,7 +245,7 @@ def connect(ssh_cmd, rhostport, python, stderr, options):
             def stream_sock_to_stdin():
                 try:
                     for data in iter(lambda: s1.recv(16384), b''):
-                        debug3(f">>>>> p.stdout.write() {len(data)} {data[:min(32,len(data))]}...")
+                        # debug3(f">>>>> p.stdout.write() {len(data)} {data[:min(32,len(data))]}...")
                         while data:
                             n = p.stdin.write(data)
                             data = data[n:]
@@ -249,7 +256,6 @@ def connect(ssh_cmd, rhostport, python, stderr, options):
 
             threading.Thread(target=stream_stdout_to_sock,  name='stream_stdout_to_sock', daemon=True).start()
             threading.Thread(target=stream_sock_to_stdin, name='stream_sock_to_stdin',  daemon=True).start()
-            # s2.setblocking(False)
             return s2
 
     # https://stackoverflow.com/questions/48671215/howto-workaround-of-close-fds-true-and-redirect-stdout-stderr-on-windows
